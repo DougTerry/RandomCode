@@ -34,6 +34,7 @@ import com.amazonaws.services.dynamodbv2.model.ProvisionedThroughput;
 import com.amazonaws.services.dynamodbv2.model.ProvisionedThroughputDescription;
 import com.amazonaws.services.dynamodbv2.model.PutItemRequest;
 import com.amazonaws.services.dynamodbv2.model.PutItemResult;
+import com.amazonaws.services.dynamodbv2.model.ReturnConsumedCapacity;
 import com.amazonaws.services.dynamodbv2.model.ScalarAttributeType;
 import com.amazonaws.services.dynamodbv2.model.ScanRequest;
 import com.amazonaws.services.dynamodbv2.model.ScanResult;
@@ -52,14 +53,30 @@ public class MainCode {
 	 * @param args
 	 */
 	public static void main(String[] args) {
-        
 		String tableName = "DougsGlobalTable";
-        Regions region = Regions.US_WEST_1;
 
+        /*
         System.out.println("Running ops on DynamoDB tables in multiple regions...");
-		
-		try {
 
+        
+        // Run ops in California region
+        opSuiteOne(Regions.US_WEST_1, tableName);
+				
+        // Now, let's try a European region!
+        System.out.println();
+        System.out.println("Now switching to another region.");
+        opSuiteTwo(Regions.EU_WEST_1, tableName);
+         */
+		
+        System.out.println("Running global table test...");
+		GlobalTableTest test = new GlobalTableTest();
+		test.runTest();
+        
+		System.out.println("Done.");
+	}
+
+    private static void opSuiteOne(Regions region, String tableName) {
+		try {
 			// Create DynamoDB client
 			AmazonDynamoDBClientBuilder builder = AmazonDynamoDBClientBuilder.standard();
 			AmazonDynamoDB ddb = builder
@@ -137,24 +154,28 @@ public class MainCode {
 
             // Add an item
             Map<String, AttributeValue> item = newMovieItem("Bill & Ted's Excellent Adventure", 1989, "****", "Sydney", "Sam");
-            PutItemRequest putItemRequest = new PutItemRequest(tableName, item);
+            PutItemRequest putItemRequest = new PutItemRequest(tableName, item)
+            		.withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL);
             PutItemResult putItemResult = ddb.putItem(putItemRequest);
-            System.out.println("Result: " + putItemResult);
+            System.out.println("Added item using compacity " + putItemResult.getConsumedCapacity().getCapacityUnits());
 
             // Add another item
             item = newMovieItem("Airplane", 1980, "*****", "Sydney", "George");
-            putItemRequest = new PutItemRequest(tableName, item);
+            putItemRequest = new PutItemRequest(tableName, item)
+    				.withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL);
             putItemResult = ddb.putItem(putItemRequest);
-            System.out.println("Result: " + putItemResult);
+            System.out.println("Added item using compacity " + putItemResult.getConsumedCapacity().getCapacityUnits());
             
             // Get an item
             HashMap<String,AttributeValue> key = new HashMap<String,AttributeValue>();
             key.put("name", new AttributeValue("Airplane"));
             GetItemRequest getItemRequest = new GetItemRequest()
             		.withTableName(tableName)
-            		.withKey(key);
+            		.withKey(key)
+            		.withConsistentRead(false)
+            		.withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL);
             GetItemResult getItemResult = ddb.getItem(getItemRequest);
-            System.out.println("Retrieved item:");
+            System.out.println("Retrieved item using capacity " + getItemResult.getConsumedCapacity().getCapacityUnits());
             printItem(getItemResult.getItem());
             
 			// Update an item
@@ -164,9 +185,10 @@ public class MainCode {
             UpdateItemRequest updateItemRequest = new UpdateItemRequest()
             		.withTableName(tableName)
             		.withKey(key)
+            		.withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
             		.withAttributeUpdates(attributeUpdates);
             UpdateItemResult updateItemResult = ddb.updateItem(updateItemRequest);
-            System.out.println("Updated item with name " + key.get("name").getS());
+            System.out.println("Updated item with name " + key.get("name").getS() + " using capacity " + updateItemResult.getConsumedCapacity().getCapacityUnits());
             
             // Get the updated item
             getItemRequest = new GetItemRequest()
@@ -185,9 +207,11 @@ public class MainCode {
                 		.withN("1985"));
             scanFilter.put("year", condition);
             ScanRequest scanRequest = new ScanRequest(tableName)
-            		.withScanFilter(scanFilter);
+            		.withScanFilter(scanFilter)
+            		.withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL);
             ScanResult scanResult = ddb.scan(scanRequest);
-            System.out.println("Scan read " + scanResult.getScannedCount() + " items");
+            System.out.println("Scan read " + scanResult.getScannedCount() + " items"
+            		+ " using capacity " + scanResult.getConsumedCapacity().getCapacityUnits());
             System.out.println("Scan returned " + scanResult.getCount() + " items");
             for (Map<String, AttributeValue> returnedItem : scanResult.getItems()) {
             	printItem(returnedItem);
@@ -200,81 +224,7 @@ public class MainCode {
             */
             
             // Shutdown client (though this is not necessary)
-			ddb.shutdown();
-			
-			// Now, let's try a different region!
-	        region = Regions.EU_WEST_1;
-			System.out.println();
-			System.out.println("Now switching to region " + region);
-			
-	        // Create DynamoDB client
-			builder = AmazonDynamoDBClientBuilder.standard();
-			ddb = builder
-					.withRegion(region)
-					.withCredentials(new ProfileCredentialsProvider("default"))
-					.build();
-
-			// Check if DynamoDB is supported in the region
-			ok = Region.getRegion(region).isServiceSupported(AmazonDynamoDB.ENDPOINT_PREFIX);
-			is = ok ? "is" : "is not";
-			System.out.println("DynamoDB " + is + " supported in region " + region);
-
-            // Create a table with a primary hash key named 'name'
-            createTableRequest = new CreateTableRequest()
-            		.withTableName(tableName)
-            		.withKeySchema(new KeySchemaElement()
-                		.withAttributeName("name")
-                		.withKeyType(KeyType.HASH))
-            		.withAttributeDefinitions(new AttributeDefinition()
-                		.withAttributeName("name")
-                		.withAttributeType(ScalarAttributeType.S))
-            		.withProvisionedThroughput(new ProvisionedThroughput()
-                		.withReadCapacityUnits(1L)
-                		.withWriteCapacityUnits(1L));
-
-            // Create table if it does not exist yet
-            TableUtils.createTableIfNotExists(ddb, createTableRequest);
-            
-            // Wait for the table to move into ACTIVE state
-            try {
-				TableUtils.waitUntilActive(ddb, tableName);
-			} 
-            catch (InterruptedException e) {
-				System.out.println("Got interrupted while waiting for table to be created.");
-				System.out.println("Exception: " + e.getMessage());
-			}
-            
-            // List tables in the region
-            tables = ddb.listTables();
-            System.out.print("Tables:");
-            for (String name : tables.getTableNames()) {
-            	System.out.print(" " + name);
-            }
-            System.out.println();
-
-            // Describe the table
-            describeTableRequest = new DescribeTableRequest()
-            		.withTableName(tableName);
-            tableDescription = ddb.describeTable(describeTableRequest).getTable();
-            System.out.println("Table Description: ");
-            printTableDescription(tableDescription);
-
-            // Add an item
-            item = newMovieItem("Wonder Woman", 2017, "***", "Margaret");
-            putItemRequest = new PutItemRequest(tableName, item);
-            putItemResult = ddb.putItem(putItemRequest);
-            System.out.println("Result: " + putItemResult);
-
-            // Get the item
-            key = new HashMap<String,AttributeValue>();
-            key.put("name", new AttributeValue("Wonder Woman"));
-             getItemRequest = new GetItemRequest()
-            		.withTableName(tableName)
-            		.withKey(key);
-            getItemResult = ddb.getItem(getItemRequest);
-            System.out.println("Retrieved item:");
-            printItem(getItemResult.getItem());
-            
+			ddb.shutdown();    	
 		} 
 		catch (AmazonServiceException ase) {
 			System.out.println("Caught an AmazonServiceException, which means a request made it "
@@ -292,13 +242,106 @@ public class MainCode {
 					+ "such as not being able to access the network.");
 			System.out.println("Error Message: " + ace.getMessage());
 		}
+    }
+	
+    private static void opSuiteTwo(Regions region, String tableName) {
+    	try {
+    		// Create DynamoDB client
+    		AmazonDynamoDBClientBuilder builder = AmazonDynamoDBClientBuilder.standard();
+    		AmazonDynamoDB ddb = builder
+    				.withRegion(region)
+    				.withCredentials(new ProfileCredentialsProvider("default"))
+    				.build();
 
-        System.out.println("Done.");
-	}
+    		// Check if DynamoDB is supported in the region
+    		boolean ok = Region.getRegion(region).isServiceSupported(AmazonDynamoDB.ENDPOINT_PREFIX);
+    		String is = ok ? "is" : "is not";
+    		System.out.println("DynamoDB " + is + " supported in region " + region);
 
-    private static void printTableDescription(TableDescription td) {
+    		// Create a table with a primary hash key named 'name'
+    		CreateTableRequest createTableRequest = new CreateTableRequest()
+    				.withTableName(tableName)
+    				.withKeySchema(new KeySchemaElement()
+    						.withAttributeName("name")
+    						.withKeyType(KeyType.HASH))
+    				.withAttributeDefinitions(new AttributeDefinition()
+    						.withAttributeName("name")
+    						.withAttributeType(ScalarAttributeType.S))
+    				.withProvisionedThroughput(new ProvisionedThroughput()
+    						.withReadCapacityUnits(1L)
+    						.withWriteCapacityUnits(1L));
+
+    		// Create table if it does not exist yet
+    		TableUtils.createTableIfNotExists(ddb, createTableRequest);
+
+    		// Wait for the table to move into ACTIVE state
+    		try {
+    			TableUtils.waitUntilActive(ddb, tableName);
+    		} 
+    		catch (InterruptedException e) {
+    			System.out.println("Got interrupted while waiting for table to be created.");
+    			System.out.println("Exception: " + e.getMessage());
+    		}
+
+    		// List tables in the region
+    		ListTablesResult tables = ddb.listTables();
+    		System.out.print("Tables:");
+    		for (String name : tables.getTableNames()) {
+    			System.out.print(" " + name);
+    		}
+    		System.out.println();
+
+    		// Describe the table
+    		DescribeTableRequest describeTableRequest = new DescribeTableRequest()
+    				.withTableName(tableName);
+    		TableDescription tableDescription = ddb.describeTable(describeTableRequest).getTable();
+    		System.out.println("Table Description: ");
+    		printTableDescription(tableDescription);
+
+    		// Add an item
+    		Map<String, AttributeValue> item = newMovieItem("Wonder Woman", 2017, "***", "Margaret");
+            PutItemRequest putItemRequest = new PutItemRequest(tableName, item)
+            		.withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL);
+            PutItemResult putItemResult = ddb.putItem(putItemRequest);
+            System.out.println("Added item using compacity " + putItemResult.getConsumedCapacity().getCapacityUnits());
+
+    		// Get the item
+    		HashMap<String, AttributeValue> key = new HashMap<String,AttributeValue>();
+    		key.put("name", new AttributeValue("Wonder Woman"));
+    		GetItemRequest getItemRequest = new GetItemRequest()
+    				.withTableName(tableName)
+    				.withKey(key)
+    				.withConsistentRead(true)
+    				.withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL);
+    		GetItemResult getItemResult = ddb.getItem(getItemRequest);
+            System.out.println("Retrieved item using capacity " + getItemResult.getConsumedCapacity().getCapacityUnits());
+    		printItem(getItemResult.getItem());
+
+    		// Shutdown client (though this is not necessary)
+    		ddb.shutdown();    	
+    	} 
+    	catch (AmazonServiceException ase) {
+    		System.out.println("Caught an AmazonServiceException, which means a request made it "
+    				+ "to AWS, but was rejected with an error response for some reason.");
+    		System.out.println("Error Message:    " + ase.getMessage());
+    		System.out.println("HTTP Status Code: " + ase.getStatusCode());
+    		System.out.println("AWS Error Code:   " + ase.getErrorCode());
+    		System.out.println("Error Type:       " + ase.getErrorType());
+    		System.out.println("Request ID:       " + ase.getRequestId());
+
+    	} 
+    	catch (AmazonClientException ace) {
+    		System.out.println("Caught an AmazonClientException, which means the client encountered "
+    				+ "a serious internal problem while trying to communicate with AWS, "
+    				+ "such as not being able to access the network.");
+    		System.out.println("Error Message: " + ace.getMessage());
+    	}
+    }
+		
+	private static void printTableDescription(TableDescription td) {
         if (td != null) {
-            System.out.format("Table name  : %s\n",
+            System.out.println("-----------");
+        	System.out.format("Table name  : %s\n",
                   td.getTableName());
             System.out.format("Table ARN   : %s\n",
                   td.getTableArn());
@@ -324,16 +367,19 @@ public class MainCode {
                 System.out.format("  %s (%s)\n",
                       a.getAttributeName(), a.getAttributeType());
             }
+            System.out.println("-----------");
         }    	
     }
     
     private static void printItem (Map<String,AttributeValue> item) {
     	if (item != null) {
+            System.out.println("-----------");
     		Set<String> keys = item.keySet();
     		for (String key : keys) {
     			System.out.format("%s: %s\n",
     					key, item.get(key).toString());
     		}
+            System.out.println("-----------");
     	}
     }
 	
