@@ -8,8 +8,12 @@ import java.util.Set;
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
+import com.amazonaws.services.dynamodbv2.document.AttributeUpdate;
 import com.amazonaws.services.dynamodbv2.document.DynamoDB;
+import com.amazonaws.services.dynamodbv2.document.Item;
 import com.amazonaws.services.dynamodbv2.document.Table;
+import com.amazonaws.services.dynamodbv2.document.UpdateItemOutcome;
+import com.amazonaws.services.dynamodbv2.document.spec.GetItemSpec;
 import com.amazonaws.services.dynamodbv2.model.AttributeAction;
 import com.amazonaws.services.dynamodbv2.model.AttributeDefinition;
 import com.amazonaws.services.dynamodbv2.model.AttributeValue;
@@ -37,8 +41,8 @@ public class GlobalTableTest {
 	
 	public final static String TABLE_KEY = "name";
 	
-	public static final Regions MASTER_REGION = Regions.EU_WEST_1;  // California
-	public static final Regions LOCAL_REGION = Regions.US_WEST_1;  // Dublin
+	public static final Regions MASTER_REGION = Regions.EU_CENTRAL_1;  // Frankfurt
+	public static final Regions LOCAL_REGION = Regions.US_WEST_1;  // California
 	public static final Regions OTHER_REGION = Regions.AP_SOUTHEAST_2;  // Sydney
 	
 	public GlobalTableTest() {
@@ -46,8 +50,10 @@ public class GlobalTableTest {
 	
 	public void runTest() {
 		GlobalMetadata gmd = new GlobalMetadata();
+		Lease masterLease = new Lease();
 		TestData data = new TestData();
-		GlobalRequestRouter grr = new GlobalRequestRouter(TABLE_NAME, LOCAL_REGION);
+		GlobalRequestRouter grr;
+		long startTime, elapsedTime;
 		
 		AmazonDynamoDB ddbMaster = AmazonDynamoDBClientBuilder.standard()
 				.withRegion(MASTER_REGION)
@@ -59,17 +65,13 @@ public class GlobalTableTest {
 				.withRegion(OTHER_REGION)
 				.build();
 		
-		Map<String, AttributeValue> item;
-		GetItemRequest getItemRequest;
-		GetItemResult getItemResult;
-		ConsistentPutItemRequest putItemRequest;
-		PutItemResult putItemResult;
-		ConsistentUpdateItemRequest updateItemRequest;
-		UpdateItemResult updateItemResult;
+		Item item;
+		Item itemRead;
 		DescribeTableRequest describeTableRequest;
 		TableDescription tableDescription;
-		HashMap<String,AttributeValue> key;
-		HashMap<String,AttributeValueUpdate> attributeUpdates;
+		GetItemSpec getItemSpec;
+		ConsistentPutItemSpec putItemSpec;
+		ConsistentUpdateItemSpec updateItemSpec;
 		
 		// Create global table in metadata
 		boolean done = gmd.createTable(TABLE_NAME, MASTER_REGION);
@@ -107,14 +109,15 @@ public class GlobalTableTest {
 		System.out.println("Added region " + OTHER_REGION);			
 		
 		// Show all regions
-		List<String> regionSet = gmd.listRegions(TABLE_NAME);
+		Set<Regions> regionSet = gmd.listRegions(TABLE_NAME);
 		System.out.print("Regions:");			
-		for (String region : regionSet) {
+		for (Regions region : regionSet) {
 			System.out.print(" " + region);						
 		}
 		System.out.println();
 
         // Describe the tables in each region
+        System.out.println();
         describeTableRequest = new DescribeTableRequest()
         		.withTableName(TABLE_NAME);
         tableDescription = ddbMaster.describeTable(describeTableRequest).getTable();
@@ -133,241 +136,369 @@ public class GlobalTableTest {
         System.out.println("Table in region " + OTHER_REGION + ": ");
         printTableDescription(tableDescription);
         
+        // Delete an item from all regions so that we can put it again
+        item = data.getMovieItem(1);
+        String itemName = item.getString(TABLE_KEY);
+        Table table = new Table(ddbMaster, TABLE_NAME);
+        table.deleteItem(TABLE_KEY, itemName);
+        table = new Table(ddbLocal, TABLE_NAME);
+        table.deleteItem(TABLE_KEY, itemName);
+        table = new Table(ddbOther, TABLE_NAME);
+        table.deleteItem(TABLE_KEY, itemName);
+   
+        // Create Global Request Router to use for all reads and writes
+		masterLease.acquire(MASTER_REGION);
+        grr = new GlobalRequestRouter(TABLE_NAME, LOCAL_REGION, masterLease);
+        System.out.println();
+        System.out.println("Using Global Request Router in region " + LOCAL_REGION);
+        System.out.println();
+
         // Write 2 items with strong consistency
         item = data.getMovieItem(1);
-        putItemRequest = (ConsistentPutItemRequest) new ConsistentPutItemRequest()
-        		.withConsistentWrite(true)
-        		.withTableName(TABLE_NAME)
-        		.withItem(item);
-        putItemResult = grr.putItem(putItemRequest);
-        System.out.println("Strong write of " + item.get(TABLE_KEY).getS());
+        startTime = System.currentTimeMillis();
+        grr.putItem(item);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("Strong consistency write of " + item.get(TABLE_KEY));
+        System.out.println("     Latency = " + elapsedTime + " ms.");
         
         item = data.getMovieItem(2);
-        putItemRequest = (ConsistentPutItemRequest) new ConsistentPutItemRequest()
+        putItemSpec = (ConsistentPutItemSpec) new ConsistentPutItemSpec()
         		.withConsistentWrite(true)
-        		.withTableName(TABLE_NAME)
         		.withItem(item);
-        putItemResult = grr.putItem(putItemRequest);
-        System.out.println("Strong write of " + item.get(TABLE_KEY).getS());
+        startTime = System.currentTimeMillis();
+        grr.putItem(putItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("Strong consistency write of " + item.get(TABLE_KEY));
+        System.out.println("     Latency = " + elapsedTime + " ms.");
         
         // Write 3 items with eventual consistency
         item = data.getMovieItem(3);
-        putItemRequest = (ConsistentPutItemRequest) new ConsistentPutItemRequest()
+        putItemSpec = (ConsistentPutItemSpec) new ConsistentPutItemSpec()
         		.withConsistentWrite(false)
-        		.withTableName(TABLE_NAME)
         		.withItem(item);
-        putItemResult = grr.putItem(putItemRequest);
-        System.out.println("Eventual write of " + item.get(TABLE_KEY).getS());
+        startTime = System.currentTimeMillis();
+        grr.putItem(putItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("Eventual consistency write of " + item.get(TABLE_KEY));
+        System.out.println("     Latency = " + elapsedTime + " ms.");
         
         item = data.getMovieItem(4);
-        putItemRequest = (ConsistentPutItemRequest) new ConsistentPutItemRequest()
+        putItemSpec = (ConsistentPutItemSpec) new ConsistentPutItemSpec()
         		.withConsistentWrite(false)
-        		.withTableName(TABLE_NAME)
         		.withItem(item);
-        putItemResult = grr.putItem(putItemRequest);
-        System.out.println("Eventual write of " + item.get(TABLE_KEY).getS());
+        startTime = System.currentTimeMillis();
+        grr.putItem(putItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("Eventual consistency write of " + item.get(TABLE_KEY));
+        System.out.println("     Latency = " + elapsedTime + " ms.");
         
         item = data.getMovieItem(5);
-        putItemRequest = (ConsistentPutItemRequest) new ConsistentPutItemRequest()
+        putItemSpec = (ConsistentPutItemSpec) new ConsistentPutItemSpec()
         		.withConsistentWrite(false)
-        		.withTableName(TABLE_NAME)
         		.withItem(item);
-        putItemResult = grr.putItem(putItemRequest);
-        System.out.println("Eventual write of " + item.get(TABLE_KEY).getS());
+        startTime = System.currentTimeMillis();
+        grr.putItem(putItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("Eventual consistency write of " + item.get(TABLE_KEY));
+        System.out.println("     Latency = " + elapsedTime + " ms.");
         
         // Read item with strong consistency
         item = data.getMovieItem(2);
-        key = new HashMap<String,AttributeValue>();
-        key.put(TABLE_KEY, item.get(TABLE_KEY));
-        getItemRequest = new GetItemRequest()
-        		.withTableName(TABLE_NAME)
-        		.withKey(key)
+        getItemSpec = new GetItemSpec()
+        		.withPrimaryKey(TABLE_KEY, item.getString(TABLE_KEY))
         		.withConsistentRead(true);
-        getItemResult = grr.getItem(getItemRequest);
+        startTime = System.currentTimeMillis();
+        itemRead = grr.getItem(getItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println();
+        System.out.println("Strong consistency read of " + item.get(TABLE_KEY));
+        System.out.println("     Latency = " + elapsedTime + " ms.");
         System.out.println("Retrieved item:");
-        data.printMovieItem(getItemResult.getItem());
+        data.printMovieItem(itemRead);
         
         // Read item with eventual consistency that was written locally
         item = data.getMovieItem(4);
-        key = new HashMap<String,AttributeValue>();
-        key.put(TABLE_KEY, item.get(TABLE_KEY));
-        getItemRequest = new GetItemRequest()
-        		.withTableName(TABLE_NAME)
-        		.withKey(key)
-        		.withConsistentRead(false);
-        getItemResult = grr.getItem(getItemRequest);
+        startTime = System.currentTimeMillis();
+        itemRead = grr.getItem(TABLE_KEY, item.getString(TABLE_KEY));
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println();
+        System.out.println("Eventual consistency read of " + item.get(TABLE_KEY));
+        System.out.println("     Latency = " + elapsedTime + " ms.");
         System.out.println("Retrieved item:");
-        data.printMovieItem(getItemResult.getItem());
-        
-        // Delete item from local region so that the next read fails 
-        // Note: The item will be restored during the next replication
-        item = data.getMovieItem(1);
-        Table table = new DynamoDB(LOCAL_REGION).getTable(TABLE_NAME);
-        String itemName = item.get(TABLE_KEY).getS();
-        table.deleteItem(TABLE_KEY, itemName);
+        data.printMovieItem(itemRead);
         
         // Read item with eventual consistency that has not yet been replicated locally
-        key = new HashMap<String,AttributeValue>();
-        key.put(TABLE_KEY, item.get(TABLE_KEY));
-        getItemRequest = new GetItemRequest()
-        		.withTableName(TABLE_NAME)
-        		.withKey(key)
+        item = data.getMovieItem(1);
+        getItemSpec = new GetItemSpec()
+        		.withPrimaryKey(TABLE_KEY, item.getString(TABLE_KEY))
         		.withConsistentRead(false);
-        getItemResult = grr.getItem(getItemRequest);
-        if (getItemResult.getItem() == null) {
-        	System.out.println("Unable to eventually read " + item.get(TABLE_KEY).getS());
+        startTime = System.currentTimeMillis();
+        itemRead = grr.getItem(getItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println();
+        if (itemRead == null) {
+        	System.out.println("Unable to read " + item.get(TABLE_KEY) + " with eventual consistency");
         } else {
-        	System.out.println("Retrieved item:");
-            data.printMovieItem(getItemResult.getItem());
+        	System.out.println("Unexpectedly retrieved item:");
+            data.printMovieItem(itemRead);
         }
+        System.out.println("     Latency = " + elapsedTime + " ms.");
         
         // Try to read item that does not exist
         item = data.getMovieItem(10);
-        key = new HashMap<String,AttributeValue>();
-        key.put(TABLE_KEY, item.get(TABLE_KEY));
-        getItemRequest = new GetItemRequest()
-        		.withTableName(TABLE_NAME)
-        		.withKey(key)
+        getItemSpec = new GetItemSpec()
+        		.withPrimaryKey(TABLE_KEY, item.getString(TABLE_KEY))
         		.withConsistentRead(true);
-        getItemResult = grr.getItem(getItemRequest);
-        if (getItemResult.getItem() == null) {
-        	System.out.println("Unable to strongly read " + item.get(TABLE_KEY).getS());
+        startTime = System.currentTimeMillis();
+        itemRead = grr.getItem(getItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        if (itemRead == null) {
+        	System.out.println("Unable to read " + item.get(TABLE_KEY) + " with strong consistency");
         } else {
-        	System.out.println("Retrieved item:");
-            data.printMovieItem(getItemResult.getItem());
+        	System.out.println("Unexpectedly retrieved item:");
+            data.printMovieItem(itemRead);
         }
+        System.out.println("     Latency = " + elapsedTime + " ms.");
         
         // Update an item with eventual consistency
         item = data.getMovieItem(4);
-        key = new HashMap<String,AttributeValue>();
-        key.put(TABLE_KEY, item.get(TABLE_KEY));
-        attributeUpdates = new HashMap<String,AttributeValueUpdate>();
-        attributeUpdates.put("rating", new AttributeValueUpdate(new AttributeValue("*"), AttributeAction.PUT));
-        attributeUpdates.put("fans", new AttributeValueUpdate(new AttributeValue().withSS("Daisy"), AttributeAction.ADD));
-        updateItemRequest = (ConsistentUpdateItemRequest) new ConsistentUpdateItemRequest()
-        		.withConsistentWrite(false)
-        		.withTableName(TABLE_NAME)
-        		.withKey(key)
-        		.withAttributeUpdates(attributeUpdates);
-        updateItemResult = grr.updateItem(updateItemRequest);
-        System.out.println("Eventual update of " + item.get(TABLE_KEY).getS());
+    	AttributeUpdate updateRating = new AttributeUpdate("rating").put("***");
+    	AttributeUpdate updateFans = new AttributeUpdate("fans").addElements("Daisy");
+    	updateItemSpec = (ConsistentUpdateItemSpec) new ConsistentUpdateItemSpec()
+				.withConsistentWrite(false)
+				.withPrimaryKey(TABLE_KEY, item.getString(TABLE_KEY))
+				.withAttributeUpdate(updateRating, updateFans);
+        startTime = System.currentTimeMillis();
+    	UpdateItemOutcome outcome = grr.updateItem(updateItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println();
+        System.out.println("Eventual consistency update of " + item.get(TABLE_KEY));
+        System.out.println("     Latency = " + elapsedTime + " ms.");
                 
         // Read updated item with eventual consistency 
-        getItemRequest = new GetItemRequest()
-        		.withTableName(TABLE_NAME)
-        		.withKey(key)
+        getItemSpec = new GetItemSpec()
+        		.withPrimaryKey(TABLE_KEY, item.getString(TABLE_KEY))
         		.withConsistentRead(false);
-        getItemResult = grr.getItem(getItemRequest);
+        startTime = System.currentTimeMillis();
+        itemRead = grr.getItem(getItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
         System.out.println("Updated item:");
-        data.printMovieItem(getItemResult.getItem());
+        data.printMovieItem(itemRead);
         
         // Update an item with strong consistency
         item = data.getMovieItem(2);
-        key = new HashMap<String,AttributeValue>();
-        key.put(TABLE_KEY, item.get(TABLE_KEY));
-        attributeUpdates = new HashMap<String,AttributeValueUpdate>();
-        attributeUpdates.put("rating", new AttributeValueUpdate(new AttributeValue("*"), AttributeAction.PUT));
-        attributeUpdates.put("fans", new AttributeValueUpdate(new AttributeValue().withSS("Daisy"), AttributeAction.ADD));
-        updateItemRequest = (ConsistentUpdateItemRequest) new ConsistentUpdateItemRequest()
-        		.withConsistentWrite(true)
-        		.withTableName(TABLE_NAME)
-        		.withKey(key)
-        		.withAttributeUpdates(attributeUpdates);
-        updateItemResult = grr.updateItem(updateItemRequest);
-        System.out.println("Strong consistency update of " + item.get(TABLE_KEY).getS());
+    	updateRating = new AttributeUpdate("rating").put("*");
+    	updateFans = new AttributeUpdate("fans").addElements("Daisy");
+    	updateItemSpec = (ConsistentUpdateItemSpec) new ConsistentUpdateItemSpec()
+				.withConsistentWrite(true)
+				.withPrimaryKey(TABLE_KEY, item.getString(TABLE_KEY))
+				.withAttributeUpdate(updateRating, updateFans);
+        startTime = System.currentTimeMillis();
+        grr.updateItem(updateItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println();
+        System.out.println("Strong consistency update of " + item.get(TABLE_KEY));
+        System.out.println("     Latency = " + elapsedTime + " ms.");
         
         // Read updated item with strong consistency
-        getItemRequest = new GetItemRequest()
-        		.withTableName(TABLE_NAME)
-        		.withKey(key)
+        getItemSpec = new GetItemSpec()
+        		.withPrimaryKey(TABLE_KEY, item.getString(TABLE_KEY))
         		.withConsistentRead(true);
-        getItemResult = grr.getItem(getItemRequest);
+        startTime = System.currentTimeMillis();
+        itemRead = grr.getItem(getItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
         System.out.println("Updated item:");
-        data.printMovieItem(getItemResult.getItem());
+        data.printMovieItem(itemRead);
         
         // Do conflicting update to an item with eventual consistency
-        item = data.getMovieItem(2);
-        key = new HashMap<String,AttributeValue>();
-        key.put(TABLE_KEY, item.get(TABLE_KEY));
-        attributeUpdates = new HashMap<String,AttributeValueUpdate>();
-        attributeUpdates.put("rating", new AttributeValueUpdate(new AttributeValue("*****"), AttributeAction.PUT));
-        updateItemRequest = (ConsistentUpdateItemRequest) new ConsistentUpdateItemRequest()
-        		.withConsistentWrite(false)
-        		.withTableName(TABLE_NAME)
-        		.withKey(key)
-        		.withAttributeUpdates(attributeUpdates);
-        updateItemResult = grr.updateItem(updateItemRequest);
-        System.out.println("Conflicting eventual consistency update of " + item.get(TABLE_KEY).getS());
+    	updateRating = new AttributeUpdate("rating").put("*****");
+    	updateFans = new AttributeUpdate("fans").addElements("Lance")
+    			.removeElements("Daisy");
+    	updateItemSpec = (ConsistentUpdateItemSpec) new ConsistentUpdateItemSpec()
+				.withConsistentWrite(false)
+				.withPrimaryKey(TABLE_KEY, item.getString(TABLE_KEY))
+				.withAttributeUpdate(updateRating, updateFans);
+        startTime = System.currentTimeMillis();
+        grr.updateItem(updateItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println();
+        System.out.println("Conflicting eventual consistency update of " + item.get(TABLE_KEY));
+        System.out.println("     Latency = " + elapsedTime + " ms.");
         
         // Read updated item with eventual consistency 
-        getItemRequest = new GetItemRequest()
-        		.withTableName(TABLE_NAME)
-        		.withKey(key)
+        getItemSpec = new GetItemSpec()
+        		.withPrimaryKey(TABLE_KEY, item.getString(TABLE_KEY))
         		.withConsistentRead(false);
-        getItemResult = grr.getItem(getItemRequest);
+        startTime = System.currentTimeMillis();
+        itemRead = grr.getItem(getItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
         System.out.println("Updated item:");
-        data.printMovieItem(getItemResult.getItem());
+        data.printMovieItem(itemRead);
         
         // Replicate items
+        System.out.println();
         ReplicationEngine re = new ReplicationEngine();
+        re.generateTimestamps(TABLE_NAME);
         int num;
         System.out.println("Replicating items...");
+        System.out.println();
+        System.out.println("Replication from " + MASTER_REGION + " to " + OTHER_REGION);
+        startTime = System.currentTimeMillis();
         num = re.pullItems(TABLE_NAME, OTHER_REGION, MASTER_REGION);
-        System.out.println(num + " items replicated from " + MASTER_REGION + " to " + OTHER_REGION);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println();
+        System.out.println("Replication from " + LOCAL_REGION + " to " + OTHER_REGION);
+        startTime = System.currentTimeMillis();
         num = re.pullItems(TABLE_NAME, OTHER_REGION, LOCAL_REGION);
-        System.out.println(num + " items replicated from " + LOCAL_REGION + " to " + OTHER_REGION);
-        num = re.pullItems(TABLE_NAME, OTHER_REGION, LOCAL_REGION);
-        System.out.println(num + " items replicated from " + LOCAL_REGION + " to " + OTHER_REGION);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println();
+        System.out.println("Replication from " + MASTER_REGION + " to " + LOCAL_REGION);
+        startTime = System.currentTimeMillis();
         num = re.pullItems(TABLE_NAME, LOCAL_REGION, MASTER_REGION);
-        System.out.println(num + " items replicated from " + MASTER_REGION + " to " + LOCAL_REGION);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println();
+        System.out.println("Replication from " + OTHER_REGION + " to " + LOCAL_REGION);
+        startTime = System.currentTimeMillis();
         num = re.pullItems(TABLE_NAME, LOCAL_REGION, OTHER_REGION);
-        System.out.println(num + " items replicated from " + OTHER_REGION + " to " + LOCAL_REGION);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println();
+        System.out.println("Replication from " + LOCAL_REGION + " to " + MASTER_REGION);
+        startTime = System.currentTimeMillis();
         num = re.pullItems(TABLE_NAME, MASTER_REGION, LOCAL_REGION);
-        System.out.println(num + " items replicated from " + LOCAL_REGION + " to " + MASTER_REGION);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println();
+        System.out.println("Replication from " + OTHER_REGION + " to " + MASTER_REGION);
+        startTime = System.currentTimeMillis();
         num = re.pullItems(TABLE_NAME, MASTER_REGION, OTHER_REGION);
-        System.out.println(num + " items replicated from " + OTHER_REGION + " to " + MASTER_REGION);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println();
         System.out.println("Completed replication.");
         System.out.println();
         
+        // Replicate again to show that nothing gets sent
+        System.out.println("Replicating items again...");
+        System.out.println();
+        System.out.println("Replication from " + MASTER_REGION + " to " + OTHER_REGION);
+        startTime = System.currentTimeMillis();
+        num = re.pullItems(TABLE_NAME, OTHER_REGION, MASTER_REGION);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println();
+        System.out.println("Replication from " + LOCAL_REGION + " to " + OTHER_REGION);
+        startTime = System.currentTimeMillis();
+        num = re.pullItems(TABLE_NAME, OTHER_REGION, LOCAL_REGION);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println();
+        System.out.println("Replication from " + MASTER_REGION + " to " + LOCAL_REGION);
+        startTime = System.currentTimeMillis();
+        num = re.pullItems(TABLE_NAME, LOCAL_REGION, MASTER_REGION);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println();
+        System.out.println("Replication from " + OTHER_REGION + " to " + LOCAL_REGION);
+        startTime = System.currentTimeMillis();
+        num = re.pullItems(TABLE_NAME, LOCAL_REGION, OTHER_REGION);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println();
+        System.out.println("Replication from " + LOCAL_REGION + " to " + MASTER_REGION);
+        startTime = System.currentTimeMillis();
+        num = re.pullItems(TABLE_NAME, MASTER_REGION, LOCAL_REGION);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println();
+        System.out.println("Replication from " + OTHER_REGION + " to " + MASTER_REGION);
+        startTime = System.currentTimeMillis();
+        num = re.pullItems(TABLE_NAME, MASTER_REGION, OTHER_REGION);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println();
+        System.out.println("Completed replication.");
+        
+        // Renew master lease just for fun
+        boolean renewed = masterLease.renew(MASTER_REGION);
+        if (renewed) {
+        	System.out.println();
+        	System.out.println("Renewed master lease for " + MASTER_REGION);
+        }
+        
         // Read updated item with eventual consistency 
         item = data.getMovieItem(2);
-        System.out.println("Eventual consistency read of item " + item.get(TABLE_KEY).getS());
-        getItemRequest = new GetItemRequest()
-        		.withTableName(TABLE_NAME)
-        		.withKey(key)
+        System.out.println();
+        System.out.println("Eventual consistency read of item " + item.get(TABLE_KEY));
+        getItemSpec = new GetItemSpec()
+        		.withPrimaryKey(TABLE_KEY, item.getString(TABLE_KEY))
         		.withConsistentRead(false);
-        getItemResult = grr.getItem(getItemRequest);
-        System.out.println("Retrieved item:");
-        data.printMovieItem(getItemResult.getItem());
+        startTime = System.currentTimeMillis();
+        itemRead = grr.getItem(getItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println("Winning item:");
+        data.printMovieItem(itemRead);
         
         // Do another update to an item with eventual consistency
-        item = data.getMovieItem(2);
-        key = new HashMap<String,AttributeValue>();
-        key.put(TABLE_KEY, item.get(TABLE_KEY));
-        attributeUpdates = new HashMap<String,AttributeValueUpdate>();
-        attributeUpdates.put("rating", new AttributeValueUpdate(new AttributeValue("*****"), AttributeAction.PUT));
-        updateItemRequest = (ConsistentUpdateItemRequest) new ConsistentUpdateItemRequest()
-        		.withConsistentWrite(false)
-        		.withTableName(TABLE_NAME)
-        		.withKey(key)
-        		.withAttributeUpdates(attributeUpdates);
-        updateItemResult = grr.updateItem(updateItemRequest);
-        System.out.println("Non-conflicting eventual update of " + item.get(TABLE_KEY).getS());
+    	updateRating = new AttributeUpdate("rating").put("*****");
+    	updateFans = new AttributeUpdate("fans").addElements("Lance");
+    	updateItemSpec = (ConsistentUpdateItemSpec) new ConsistentUpdateItemSpec()
+				.withConsistentWrite(false)
+				.withPrimaryKey(TABLE_KEY, item.getString(TABLE_KEY))
+				.withAttributeUpdate(updateRating, updateFans);
+        startTime = System.currentTimeMillis();
+        grr.updateItem(updateItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println();
+        System.out.println("Non-conflicting eventual consistency update of " + item.get(TABLE_KEY));
+        System.out.println("     Latency = " + elapsedTime + " ms.");
         
         // Read updated item with eventual consistency 
-        getItemRequest = new GetItemRequest()
-        		.withTableName(TABLE_NAME)
-        		.withKey(key)
+        getItemSpec = new GetItemSpec()
+        		.withPrimaryKey(TABLE_KEY, item.getString(TABLE_KEY))
         		.withConsistentRead(false);
-        getItemResult = grr.getItem(getItemRequest);
+        startTime = System.currentTimeMillis();
+        itemRead = grr.getItem(getItemSpec);
+        elapsedTime = System.currentTimeMillis() - startTime;
         System.out.println("Updated item:");
-        data.printMovieItem(getItemResult.getItem());
+        data.printMovieItem(itemRead);
         
         // Re-replicate to master
-        System.out.println("Replicating update to master region...");
+        System.out.println();
+        System.out.println("Replication from " + LOCAL_REGION + " to " + MASTER_REGION);
+        startTime = System.currentTimeMillis();
         num = re.pullItems(TABLE_NAME, MASTER_REGION, LOCAL_REGION);
-        System.out.println(num + " items replicated from " + LOCAL_REGION + " to " + MASTER_REGION);
-
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        
+        // Replicate global metadata in multiple regions as its own global table
+        System.out.println();
+        gmd.bootstrapMetadata();
+        System.out.println("Replication of metadata items from " + gmd.getMetadataMaster() 
+    		+ " to " + gmd.getMetadataSecondary());
+        startTime = System.currentTimeMillis();
+        num = gmd.replicateMetadata();
+        elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println("     " + num + " items replicated");
+        System.out.println("     Latency = " + elapsedTime + " ms.");
+        System.out.println();
 	}
 	
 	private static void printTableDescription(TableDescription td) {

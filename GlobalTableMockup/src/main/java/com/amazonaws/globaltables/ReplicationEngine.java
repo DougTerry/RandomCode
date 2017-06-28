@@ -4,6 +4,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
@@ -26,15 +27,22 @@ public class ReplicationEngine {
 	// table name -> target region -> source region -> timestamp
 	private Map<String, Map<String, Map<String, Long>>> highTimestamps;
 	
-	// System attributes that are added by the GRR
-	private static final String UPDATE_TIMESTAMP = "zgtTimestamp";   // time of last update to item
-	private static final String UPDATE_ORIGIN = "zgtOrigin";   // region where item was updated
-	private static final String UPDATE_VERSION = "zgtVersion";  // version vector
-
+	private GlobalMetadata gmd;
+	
 	public ReplicationEngine() {
 		highTimestamps = new HashMap<String, Map<String, Map<String, Long>>>();
+		gmd = new GlobalMetadata();
 	}
 	
+	public void generateTimestamps(String tableName) {
+		if (!highTimestamps.containsKey(tableName)) {
+			highTimestamps.put(tableName, getTableTimestamps(tableName));
+		}		
+	}
+		
+	/*
+	 * Replicate recently updated items from the source region to the target region.
+	 */
 	public int pullItems(String tableName, Regions target, Regions source) {
 		Map<String, Map<String, Long>> tableTimestamps;
 		if (!highTimestamps.containsKey(tableName)) {
@@ -45,46 +53,17 @@ public class ReplicationEngine {
 		}
 		
 		// Scan source for recently updated items
-		/*
-		AmazonDynamoDB ddbSource = AmazonDynamoDBClientBuilder.standard()
-				.withRegion(source)
-				.build();
-		Map<String, AttributeValue> expressionAttributeValues = new HashMap<String, AttributeValue>();
-		Long minTime = tableTimestamps.get(target.getName()).get(source.getName());
-		expressionAttributeValues.put(":mintime", new AttributeValue().withN(Long.toString(minTime)));		
-		ScanRequest scanRequest = new ScanRequest()
-			    .withTableName(tableName)
-			    .withExpressionAttributeValues(expressionAttributeValues)
-			    .withFilterExpression(UPDATE_TIMESTAMP + " > :mintime");
-		ScanResult scanResult = ddbSource.scan(scanRequest);		
-		 */
-		
-		// Use better scan technique
 		DynamoDB ddbSource = new DynamoDB(source);
 		Table sourceTable = ddbSource.getTable(tableName);
 		Long lastSyncTime = tableTimestamps.get(target.getName()).get(source.getName());
-		ScanFilter recentTimestamp = new ScanFilter(UPDATE_TIMESTAMP).gt(lastSyncTime);
-		ScanFilter updatedBySource = new ScanFilter(UPDATE_ORIGIN).eq(source.getName());
+		ScanFilter recentTimestamp = SystemAttributes.getTimestampFilter(lastSyncTime);
+		ScanFilter updatedBySource = SystemAttributes.getOriginFilter(source);
 		ScanSpec scanSpec = new ScanSpec()
 				.withConsistentRead(true)
 				.withScanFilters(updatedBySource, recentTimestamp);
 		ItemCollection<ScanOutcome> scanResults = sourceTable.scan(scanSpec);
 		
 		// Write items to target
-		/*
-		AmazonDynamoDB ddbTarget = AmazonDynamoDBClientBuilder.standard()
-				.withRegion(target)
-				.build();
-		Long maxTimestamp = minTime;
-		for (Map<String, AttributeValue> item : scanResult.getItems()) {
-	        PutItemRequest putItemRequest = new PutItemRequest(tableName, item);
-	        ddbTarget.putItem(putItemRequest);
-		    Long itemTimestamp = Long.parseLong(item.get(UPDATE_TIMESTAMP).getN());
-		    if (itemTimestamp > maxTimestamp) {
-		    	maxTimestamp = itemTimestamp;
-		    }
-		}
-		*/
 		Table targetTable = new DynamoDB(target).getTable(tableName);
 		String keyAttribute = targetTable.describe().getKeySchema().get(0).getAttributeName();
 		ConflictResolver resolver = new ConflictResolver();
@@ -99,16 +78,17 @@ public class ReplicationEngine {
 	        
 	        // Check for conflict with item stored in target table
 	        Item targetItem = targetTable.getItem(keyAttribute, sourceItem.getString(keyAttribute));
+        	//System.out.println("Source item " + sourceItem);
+        	//System.out.println("Target item " + targetItem);
 	        if (resolver.isConflict(sourceItem, targetItem)) {
-	        	GlobalMetadata gmd = new GlobalMetadata();
-	        	System.out.println("Conflict detected to item " + sourceItem.getString(keyAttribute));
-	        	System.out.println("   when replicating from  " + source + " to " + target);
+	        	System.out.println("     Conflict detected to item " + sourceItem.getString(keyAttribute));
+	        	System.out.println("         when replicating from  " + source + " to " + target);
 	        	numConflicts++;
 	        	if (!resolver.isWinner(sourceItem, targetItem, gmd.getMaster(tableName))) {
 	        		doUpdate = false;
-	        		System.out.println("Version at " + target + " was retained as the winner.");
+	        		System.out.println("     Version at " + target + " was retained as the winner.");
 	        	} else {
-	        		System.out.println("Version from " + source + " was written as the winner.");	        		
+	        		System.out.println("     Version from " + source + " was written as the winner.");	        		
 	        	}
 	        }
 	        
@@ -131,36 +111,61 @@ public class ReplicationEngine {
     	return numReplicated;
 	}
 	
+	/*
+	 * Replicate recently updated items between all pairs of replicas for the given table.
+	 */
+	public int syncReplicas(String tableName) {
+		Set<Regions> replicaSet = gmd.listRegions(tableName);
+		int numReplicated = 0;
+		
+		if (replicaSet == null) {
+			return 0;
+		}
+		
+		for (Regions target : replicaSet) {
+			for (Regions source : replicaSet) {
+				if (!target.equals(source)) {
+					int num = this.pullItems(tableName, target, source);
+					numReplicated += num;
+				}
+			}
+		}
+		
+    	return numReplicated;
+	}
+	
 	private Map<String, Map<String, Long>> getTableTimestamps(String tableName) {
 		Map<String, Map<String, Long>> timestamps = new HashMap<String, Map<String, Long>>();
 		
 		// Get regions for table
 		GlobalMetadata gmd = new GlobalMetadata();
-		List<String> replicaSet = gmd.listRegions(tableName);
+		Set<Regions> replicaSet = gmd.listRegions(tableName);
 		
 		// Initialize timestamps to all zeros
-		for (String target : replicaSet) {
+		for (Regions target : replicaSet) {
 			HashMap<String, Long> timesForTarget = new HashMap<String, Long>();
-			for (String source : replicaSet) {
-				timesForTarget.put(source, 0L);
+			for (Regions source : replicaSet) {
+				timesForTarget.put(source.getName(), 0L);
 			}
-			timestamps.put(target, timesForTarget);
+			timestamps.put(target.getName(), timesForTarget);
 		}
 		
 		// Scan replicas to update latest timestamps from each region
-		for (String target : replicaSet) {
+		for (Regions target : replicaSet) {
 			AmazonDynamoDB ddb = AmazonDynamoDBClientBuilder.standard()
-					.withRegion(Regions.fromName(target))
+					.withRegion(target)
 					.build();
 			ScanRequest scanRequest = new ScanRequest()
 				    .withTableName(tableName);
 			ScanResult scanResult = ddb.scan(scanRequest);
-			for (Map<String, AttributeValue> item : scanResult.getItems()){
-			    Long itemTimestamp = Long.parseLong(item.get(UPDATE_TIMESTAMP).getN());
-			    String itemOrigin = item.get(UPDATE_ORIGIN).getS();
-			    if (itemTimestamp > timestamps.get(target).get(itemOrigin)) {
-			    	timestamps.get(target).replace(itemOrigin, itemTimestamp);
-			    }
+			if (scanResult != null) {
+				for (Map<String, AttributeValue> item : scanResult.getItems()){
+					Long itemTimestamp = SystemAttributes.getTimestamp(item);
+					String itemOrigin = SystemAttributes.getOrigin(item);
+					if (itemTimestamp > timestamps.get(target.getName()).get(itemOrigin)) {
+						timestamps.get(target.getName()).replace(itemOrigin, itemTimestamp);
+					}
+				}
 			}
 		}
 		

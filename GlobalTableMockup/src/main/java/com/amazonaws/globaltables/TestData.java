@@ -1,10 +1,6 @@
 package com.amazonaws.globaltables;
 
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Set;
-
-import com.amazonaws.services.dynamodbv2.model.AttributeValue;
+import com.amazonaws.services.dynamodbv2.document.Item;
 
 public class TestData {
 
@@ -12,8 +8,8 @@ public class TestData {
 		// does nothing
 	}
 	
-	public Map<String, AttributeValue> getMovieItem(int n) {
-		Map<String, AttributeValue> item;
+	public Item getMovieItem(int n) {
+		Item item;
 		switch (n) {
 		case 1:
 			item = newMovieItem("Bill & Ted's Excellent Adventure", 1989, "****", "Sydney", "Sam");
@@ -51,22 +47,22 @@ public class TestData {
 		return item;
 	}
 	
-	public Map<String, AttributeValue> newMovieItem(String name, int year, String rating, String... fans) {
-        Map<String, AttributeValue> item = new HashMap<String, AttributeValue>();
-        item.put("name", new AttributeValue(name));
-        item.put("year", new AttributeValue().withN(Integer.toString(year)));
-        item.put("rating", new AttributeValue(rating));
-        item.put("fans", new AttributeValue().withSS(fans));
-        return item;
-    }
+	public Item newMovieItem(String name, int year, String rating, String... fans) {
+		Item item = new Item()
+				.withString("name", name)
+				.withInt("year", year)
+				.withString("rating", rating)
+				.withStringSet("fans", fans);
+		return item;
+	}
 	
-	public void printMovieItem(Map<String, AttributeValue> item) {
+	public void printMovieItem(Item item) {
         System.out.println("-----------");
         if (item != null) {
-            System.out.println("name: " + item.get("name").getS());
-            System.out.println("year: " + item.get("year").getN());
-            System.out.println("rating: " + item.get("rating").getS());
-            System.out.println("fans: " + item.get("fans").getSS());
+            System.out.println("name: " + item.getString("name"));
+            System.out.println("year: " + item.getInt("year"));
+            System.out.println("rating: " + item.getString("rating"));
+            System.out.println("fans: " + item.getStringSet("fans"));
     	}
         System.out.println("-----------");
 	}

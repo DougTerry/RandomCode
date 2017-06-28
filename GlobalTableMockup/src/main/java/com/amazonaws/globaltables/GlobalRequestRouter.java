@@ -1,11 +1,21 @@
 package com.amazonaws.globaltables;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
+import com.amazonaws.services.dynamodbv2.document.AttributeUpdate;
+import com.amazonaws.services.dynamodbv2.document.DynamoDB;
+import com.amazonaws.services.dynamodbv2.document.Item;
+import com.amazonaws.services.dynamodbv2.document.PrimaryKey;
+import com.amazonaws.services.dynamodbv2.document.PutItemOutcome;
+import com.amazonaws.services.dynamodbv2.document.Table;
+import com.amazonaws.services.dynamodbv2.document.UpdateItemOutcome;
+import com.amazonaws.services.dynamodbv2.document.spec.GetItemSpec;
+import com.amazonaws.services.dynamodbv2.document.spec.PutItemSpec;
 import com.amazonaws.services.dynamodbv2.model.AttributeAction;
 import com.amazonaws.services.dynamodbv2.model.AttributeValue;
 import com.amazonaws.services.dynamodbv2.model.AttributeValueUpdate;
@@ -13,6 +23,7 @@ import com.amazonaws.services.dynamodbv2.model.GetItemRequest;
 import com.amazonaws.services.dynamodbv2.model.GetItemResult;
 import com.amazonaws.services.dynamodbv2.model.PutItemRequest;
 import com.amazonaws.services.dynamodbv2.model.PutItemResult;
+import com.amazonaws.services.dynamodbv2.model.TableDescription;
 import com.amazonaws.services.dynamodbv2.model.UpdateItemResult;
 
 public class GlobalRequestRouter {
@@ -22,27 +33,31 @@ public class GlobalRequestRouter {
 	 * and strongly consistent reads/writes to the master region
 	 */
 	
-	// System attributes that are added by the GRR
-	private static final String UPDATE_TIMESTAMP = "zgtTimestamp";   // time of last update to item
-	private static final String UPDATE_ORIGIN = "zgtOrigin";   // region where item was updated
-	private static final String UPDATE_VERSION = "zgtVersion";  // version vector
-	
 	private String tableName;
+	
+	private String keyName;
 	
 	private Regions localRegion;
 	private Regions masterRegion;
 	
 	private GlobalMetadata metadata;
 	
+	private Lease masterLease;
+	
 	// Handles to DynamoDB clients for the master and local regions
 	private AmazonDynamoDB ddbMaster;
 	private AmazonDynamoDB ddbLocal;
-
-	public GlobalRequestRouter(String table, Regions region) {
+	
+	// Handles to tables in master and local regions
+	private Table masterReplica;
+	private Table localReplica;
+	
+	public GlobalRequestRouter(String table, Regions region, Lease lease) {
 		tableName = table;
 		localRegion = region;
 		metadata = new GlobalMetadata();
 		masterRegion = metadata.getMaster(table);
+		masterLease = lease;
 		
 		// Create DynamoDB client for local region
 		ddbLocal = AmazonDynamoDBClientBuilder.standard()
@@ -53,12 +68,128 @@ public class GlobalRequestRouter {
 		ddbMaster = AmazonDynamoDBClientBuilder.standard()
 				.withRegion(masterRegion)
 				.build();
+		
+		// Create table handles
+        localReplica = new Table(ddbLocal, table);
+        masterReplica = new Table(ddbMaster, table);
+        
+        // Get primary key for table
+        TableDescription desc = masterReplica.describe();
+        keyName = desc.getKeySchema().get(0).getAttributeName();
 	}
+	
+	public GlobalRequestRouter(String table, String keyAttr, Regions master) {
+		// variant for running in the master region
+		tableName = table;
+        keyName = keyAttr;
+		localRegion = master;
+		masterRegion = master;
+		masterLease = null;
+		metadata = null;
+	
+		// Create DynamoDB client
+		ddbLocal = AmazonDynamoDBClientBuilder.standard()
+				.withRegion(localRegion)
+				.build();
+		ddbMaster = ddbLocal;
+		
+		// Create table handles
+        localReplica = new Table(ddbLocal, table);
+        masterReplica = localReplica;
+	}
+	
+	
+	/*
+	 * Operations that mimic some of those in the Table interface
+	 */
+	
+	public Item getItem(String hashKeyName, Object hashKeyValue) {
+        GetItemSpec getItemSpec = new GetItemSpec()
+        		.withConsistentRead(false)
+        		.withPrimaryKey(hashKeyName, hashKeyValue);
+        return getItem(getItemSpec);
+	}
+	
+	public Item getItem(GetItemSpec spec) {
+		// Select replica based on desired consistency
+		Table replica = localReplica;
+		if (spec.isConsistentRead()) {
+			refreshMasterEndpoint();
+			replica = masterReplica;
+		}
+		
+		// Do read
+		Item item = replica.getItem(spec);
+        return item;
+	}
+	
+	public PutItemOutcome putItem(Item item) {
+		ConsistentPutItemSpec putSpec = (ConsistentPutItemSpec) new ConsistentPutItemSpec()
+				.withConsistentWrite(true)
+				.withItem(item);
+		return putItem(putSpec);
+	}
+	
+	public PutItemOutcome putItem(ConsistentPutItemSpec spec) {
+		// Select replica based on desired consistency
+		Regions regionToWrite = localRegion;
+		Table replica = localReplica;
+		if (spec.isConsistentWrite()) {
+			refreshMasterEndpoint();
+			regionToWrite = masterRegion;
+			replica = masterReplica;
+		}
+		
+		// Add system attributes to item being written
+		Item item = spec.getItem();
+		VersionVector newVersion = bumpVersionVector(replica, item.getString(keyName), regionToWrite);
+		SystemAttributes.setTimestamp(item, System.currentTimeMillis());
+		SystemAttributes.setOrigin(item, regionToWrite.getName());
+		SystemAttributes.setVersion(item, newVersion);  
+		
+		// Do write
+		PutItemOutcome outcome = replica.putItem(spec);
+        return outcome;
+	}
+	
+	public UpdateItemOutcome updateItem(String hashKeyName, Object hashKeyValue, AttributeUpdate... attributeUpdates) {
+        ConsistentUpdateItemSpec updateSpec = (ConsistentUpdateItemSpec) new ConsistentUpdateItemSpec()
+				.withConsistentWrite(true)
+        		.withPrimaryKey(hashKeyName, hashKeyValue)
+				.withAttributeUpdate(attributeUpdates);
+        return updateItem(updateSpec);
+	}
+
+	public UpdateItemOutcome updateItem(ConsistentUpdateItemSpec spec) {
+		// Select replica based on desired consistency
+		Regions regionToWrite = localRegion;
+		Table replica = localReplica;
+		if (spec.isConsistentWrite()) {
+			refreshMasterEndpoint();
+			regionToWrite = masterRegion;
+			replica = masterReplica;
+		}
+		
+		// Add updates for item's system attributes
+		VersionVector newVersion = bumpVersionVector(replica, spec.getPrimaryKeyValue(), regionToWrite);
+		spec.addAttributeUpdate(SystemAttributes.updateTimestamp());
+		spec.addAttributeUpdate(SystemAttributes.updateOrigin(regionToWrite));
+		spec.addAttributeUpdate(SystemAttributes.updateVersion(newVersion, regionToWrite));
+		
+		// Do write
+		UpdateItemOutcome outcome = replica.updateItem(spec);
+        return outcome;
+	}
+
+	
+	/*
+	 * Lower-level alternative operations (that are not needed)
+	 */
 	
 	public GetItemResult getItem(GetItemRequest getItemRequest) {
 		AmazonDynamoDB ddb = ddbLocal;
 		if (getItemRequest.isConsistentRead()) {
-			refreshMasterEndpoint(tableName);
+			refreshMasterEndpoint();
 			ddb = ddbMaster;
 		}
 		GetItemResult getItemResult = ddb.getItem(getItemRequest);
@@ -69,7 +200,7 @@ public class GlobalRequestRouter {
 		Regions regionToWrite = localRegion;
 		AmazonDynamoDB ddb = ddbLocal;
 		if (putItemRequest.isConsistentWrite()) {
-			refreshMasterEndpoint(tableName);
+			refreshMasterEndpoint();
 			regionToWrite = masterRegion;
 			ddb = ddbMaster;
 		}
@@ -77,9 +208,9 @@ public class GlobalRequestRouter {
 		HashMap<String,AttributeValue> key = new HashMap<String,AttributeValue>();
         key.put("name", putItemRequest.getItem().get("name"));  // should not have to know about primary key
 		AttributeValue versionVector = bumpVersionVector(putItemRequest.getTableName(), key, ddb, regionToWrite);
-		item.put(UPDATE_TIMESTAMP, new AttributeValue().withN(Long.toString(System.currentTimeMillis())));
-		item.put(UPDATE_ORIGIN, new AttributeValue(regionToWrite.getName()));
-		item.put(UPDATE_VERSION, versionVector);  
+		SystemAttributes.setTimestamp(item, System.currentTimeMillis());
+		SystemAttributes.setOrigin(item, regionToWrite.getName());
+		SystemAttributes.setVersion(item, versionVector);  
 		PutItemResult putItemResult = ddb.putItem(putItemRequest);
         return putItemResult;
 	}
@@ -88,30 +219,66 @@ public class GlobalRequestRouter {
 		Regions regionToWrite = localRegion;
 		AmazonDynamoDB ddb = ddbLocal;
 		if (updateItemRequest.isConsistentWrite()) {
-			refreshMasterEndpoint(tableName);
+			refreshMasterEndpoint();
 			regionToWrite = masterRegion;
 			ddb = ddbMaster;
 		}
-		Map<String, AttributeValueUpdate> updates = updateItemRequest.getAttributeUpdates();
+		
+		// Create item to temporarily hold system attribute values
+		Map<String, AttributeValue> item = new HashMap<String, AttributeValue>();
+		SystemAttributes.setTimestamp(item, System.currentTimeMillis());
+		SystemAttributes.setOrigin(item, regionToWrite.getName());
 		AttributeValue versionVector = bumpVersionVector(updateItemRequest.getTableName(), updateItemRequest.getKey(), ddb, regionToWrite);
-		updates.put(UPDATE_TIMESTAMP, new AttributeValueUpdate(new AttributeValue().withN(Long.toString(System.currentTimeMillis())), AttributeAction.PUT));
-		updates.put(UPDATE_ORIGIN, new AttributeValueUpdate(new AttributeValue(regionToWrite.getName()), AttributeAction.PUT));
-		updates.put(UPDATE_VERSION, new AttributeValueUpdate(versionVector, AttributeAction.PUT));  
+		SystemAttributes.setVersion(item, versionVector);  
+		
+		// Add updates for item's system attributes
+		Map<String, AttributeValueUpdate> updates = updateItemRequest.getAttributeUpdates();
+		for (String key : item.keySet()) {
+			updates.put(key, new AttributeValueUpdate(item.get(key), AttributeAction.PUT));			
+		}
 		UpdateItemResult updateItemResult = ddb.updateItem(updateItemRequest);
         return updateItemResult;
 	}
 	
-	private void refreshMasterEndpoint(String table) {
-		Regions currentMaster = metadata.getMaster(table);
-		if (currentMaster != masterRegion) {
-			// master region has changed
-			masterRegion = currentMaster;
-			ddbMaster = AmazonDynamoDBClientBuilder.standard()
-					.withRegion(masterRegion)
-					.build();			
+	/*
+	 * Internal operations
+	 */
+	
+	private void refreshMasterEndpoint() {
+		if (metadata == null) {
+			return;
+		} 
+		if (masterLease.maybeExpired()) {
+			Regions currentMaster = metadata.getMaster(tableName);
+			if (currentMaster != masterRegion) {
+				// master region has changed
+				masterRegion = currentMaster;
+				ddbMaster = AmazonDynamoDBClientBuilder.standard()
+						.withRegion(masterRegion)
+						.build();			
+				masterReplica = new Table(ddbMaster, tableName);
+			}
 		}
 	}
 	
+	private VersionVector bumpVersionVector(Table replica, String key, Regions region) {
+		// Read current item
+		GetItemSpec getSpec = new GetItemSpec()
+				.withPrimaryKey(keyName, key)
+				.withConsistentRead(true);
+		Item storedItem = replica.getItem(getSpec);
+		
+		// Increment version vector
+		VersionVector newVersion;
+		if (storedItem == null) {
+			newVersion = new VersionVector(region);
+		} else {
+			newVersion = SystemAttributes.getVersion(storedItem).bump(region);
+		}
+		return newVersion;
+	}
+	
+	// deprecated
 	private AttributeValue bumpVersionVector(String tableName, Map<String,AttributeValue> primaryKey, AmazonDynamoDB ddb, Regions region) {
 		Map<String,AttributeValue> versionVector = null;
 		
@@ -124,14 +291,14 @@ public class GlobalRequestRouter {
 
 		// Now bump the local region's entry
         if (getItemResult.getItem() != null) {
-        	versionVector = getItemResult.getItem().get(UPDATE_VERSION).getM();
+        	Map<String, AttributeValue> item = getItemResult.getItem();
+        	versionVector = SystemAttributes.getVersion(item);
         } 
         if (versionVector == null) {
         	versionVector = new HashMap<String,AttributeValue>();
         }
         if (versionVector.containsKey(region.getName())) {
         	int count = Integer.parseInt(versionVector.get(region.getName()).getN());
-        	count++;
         	versionVector.replace(region.getName(), new AttributeValue().withN(Integer.toString(count + 1)));       	
         } else {
         	versionVector.put(region.getName(), new AttributeValue().withN("1"));
