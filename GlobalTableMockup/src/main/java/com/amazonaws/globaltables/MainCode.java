@@ -59,16 +59,16 @@ public class MainCode {
 		String tableName = "DougsGlobalTable";
 
         // Run ops in California region
-        BasicTest.opSuiteOne(Regions.US_WEST_1, tableName);
+        TestBasic.opSuiteOne(Regions.US_WEST_1, tableName);
 				
         // Now, let's try a European region!
         System.out.println();
         System.out.println("Now switching to another region.");
-        BasicTest.opSuiteTwo(Regions.EU_WEST_1, tableName);
+        TestBasic.opSuiteTwo(Regions.EU_WEST_1, tableName);
          */
 		
         System.out.println("Running global table test...");
-		GlobalTableTest test = new GlobalTableTest();
+		TestGlobalTable test = new TestGlobalTable();
 		test.runTest();
         
 		System.out.println("Done.");

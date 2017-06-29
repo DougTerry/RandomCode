@@ -42,7 +42,7 @@ public class Lease {
 	}
 	
 	public Lease(Regions owner) {
-		// new lease that already expired with no owner
+		// new lease for the given owner
 		this.owner = owner;
 		expiration = new Date(System.currentTimeMillis() + DEFAULT_DURATION);
 		nextOwner = null;

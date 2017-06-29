@@ -49,7 +49,8 @@ public class GlobalMetadata {
 	private static final String METADATA_REGIONS = "Regions";
 	private static final String METADATA_MASTER = "Master";
 	
-	// Note: Leases are not currently managed by this class.
+	// Note: Leases are not currently stored in the metadata table.
+	private Map<String,Lease> leaseTable;
 
 	// Metadata is itself stored as a global table and hence is accessed using a GRR
 	private GlobalRequestRouter mdTable;
@@ -57,10 +58,19 @@ public class GlobalMetadata {
 	public GlobalMetadata() {
         // Create metadata table if it does not exist
         createMetadataTableStore(METADATA_MASTER_REGION);
+        
+        // Create lease table (which should really be stored in the metadata table)
+        leaseTable = new HashMap<String,Lease>();
+        leaseTable.put(METADATA_TABLE_NAME, new Lease(METADATA_MASTER_REGION));
 		
 		// Create DynamoDB client
-        mdTable = new GlobalRequestRouter(METADATA_TABLE_NAME, METADATA_KEY, METADATA_MASTER_REGION);
+        mdTable = new GlobalRequestRouter(METADATA_TABLE_NAME, METADATA_MASTER_REGION, this);
 	}
+
+	
+	/*
+	 * Main operations on metadata
+	 */
 	
 	public boolean createTable(String tableName, Regions region) {
 		// Check if global table already exists
@@ -105,26 +115,43 @@ public class GlobalMetadata {
 		return Regions.fromName(item.getString(METADATA_MASTER));
 	}
 	
-	public boolean acquireMastership(String tableName, Regions region) {
+	public boolean setMaster(String tableName, Regions region) {
         AttributeUpdate update = new AttributeUpdate(METADATA_MASTER).put(region.getName());
         updateItem(tableName, update);
 		return true;
 	}
 	
+	public Lease getLease(String tableName) {
+		Lease lease;
+		if (leaseTable.containsKey(tableName)) {
+			lease = leaseTable.get(tableName);
+		} else {
+			lease = new Lease();
+			leaseTable.put(tableName, lease);
+		}
+		return lease;
+	}
+	
+	public void setLease(String tableName, Lease lease) {
+		leaseTable.put(tableName, lease);
+	}
+	
 	
 	/*
-	 * Private methods
+	 * Private methods for reading and writing metadata table
 	 */
 	
 	private Item lookupMetadata(String tableName) {
-        GetItemSpec getItemSpec = new GetItemSpec()
+        // metadata read with eventual consistency
+		GetItemSpec getItemSpec = new GetItemSpec()
         		.withPrimaryKey(METADATA_KEY, tableName)
-        		.withConsistentRead(true);
+        		.withConsistentRead(false);
         Item item = mdTable.getItem(getItemSpec);
         return item;
 	}
 	
 	private PutItemOutcome putItem(Item item) {
+        // metadata written with strong consistency
 		ConsistentPutItemSpec putSpec = (ConsistentPutItemSpec) new ConsistentPutItemSpec()
 				.withConsistentWrite(true)
 				.withItem(item);
@@ -132,33 +159,15 @@ public class GlobalMetadata {
 	}
 	
 	private UpdateItemOutcome updateItem(String tableName, AttributeUpdate... attributeUpdates) {
+        // metadata written with strong consistency
         ConsistentUpdateItemSpec updateSpec = (ConsistentUpdateItemSpec) new ConsistentUpdateItemSpec()
 				.withConsistentWrite(true)
 				.withPrimaryKey(METADATA_KEY, tableName)
 				.withAttributeUpdate(attributeUpdates);
         return mdTable.updateItem(updateSpec);
 	}
-	
-	private void createMetadataTableStore(Regions region) {
-        // Create metadata table if it does not exist
-		AmazonDynamoDB ddb = AmazonDynamoDBClientBuilder.standard()
-				.withRegion(region)
-				.build();
-		CreateTableRequest createTableRequest = new CreateTableRequest()
-        		.withTableName(METADATA_TABLE_NAME)
-        		.withKeySchema(new KeySchemaElement()
-            		.withAttributeName(METADATA_KEY)
-            		.withKeyType(KeyType.HASH))
-        		.withAttributeDefinitions(new AttributeDefinition()
-            		.withAttributeName(METADATA_KEY)
-            		.withAttributeType(ScalarAttributeType.S))
-				.withProvisionedThroughput(new ProvisionedThroughput()
-					.withReadCapacityUnits(1L)
-					.withWriteCapacityUnits(1L));
-        TableUtils.createTableIfNotExists(ddb, createTableRequest);
-	}
-	
 
+	
 	/*
 	 * Methods for creating and replicating metadata as a global table
 	 */
@@ -171,6 +180,13 @@ public class GlobalMetadata {
 			SystemAttributes.addToTable(METADATA_TABLE_NAME, METADATA_MASTER_REGION);		
 		};
 	}
+
+	private void createMetadataTableStore(Regions region) {
+        // Create metadata table if it does not exist
+		ControlPlane cp = new ControlPlane();
+		cp.createRegionReplica(METADATA_TABLE_NAME, METADATA_KEY, region);
+	}
+	
 
 	public int replicateMetadata() {
 		ReplicationEngine re = new ReplicationEngine();

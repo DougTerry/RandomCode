@@ -38,9 +38,9 @@ import com.amazonaws.services.dynamodbv2.model.UpdateItemRequest;
 import com.amazonaws.services.dynamodbv2.model.UpdateItemResult;
 import com.amazonaws.services.dynamodbv2.util.TableUtils;
 
-public class BasicTest {
+public class TestBasic {
 
-	public BasicTest() {
+	public TestBasic() {
 		// TODO Auto-generated constructor stub
 	}
 

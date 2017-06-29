@@ -52,50 +52,31 @@ public class GlobalRequestRouter {
 	private Table masterReplica;
 	private Table localReplica;
 	
-	public GlobalRequestRouter(String table, Regions region, Lease lease) {
+	
+	/*
+	 * Constructor for a global request router that "runs" in the given region
+	 * and accesses the given table
+	 */
+	public GlobalRequestRouter(String table, Regions region, GlobalMetadata metadata) {
 		tableName = table;
 		localRegion = region;
-		metadata = new GlobalMetadata();
-		masterRegion = metadata.getMaster(table);
-		masterLease = lease;
-		
+		this.metadata = metadata;
+
 		// Create DynamoDB client for local region
 		ddbLocal = AmazonDynamoDBClientBuilder.standard()
 				.withRegion(localRegion)
 				.build();
-		
-		// Create DynamoDB client for master region
-		ddbMaster = AmazonDynamoDBClientBuilder.standard()
-				.withRegion(masterRegion)
-				.build();
-		
-		// Create table handles
         localReplica = new Table(ddbLocal, table);
-        masterReplica = new Table(ddbMaster, table);
+		
+		// For now, master region is unknown
+		masterRegion = null;
+		masterLease = null;
+		ddbMaster = null;
+        masterReplica = null;
         
         // Get primary key for table
-        TableDescription desc = masterReplica.describe();
+        TableDescription desc = localReplica.describe();
         keyName = desc.getKeySchema().get(0).getAttributeName();
-	}
-	
-	public GlobalRequestRouter(String table, String keyAttr, Regions master) {
-		// variant for running in the master region
-		tableName = table;
-        keyName = keyAttr;
-		localRegion = master;
-		masterRegion = master;
-		masterLease = null;
-		metadata = null;
-	
-		// Create DynamoDB client
-		ddbLocal = AmazonDynamoDBClientBuilder.standard()
-				.withRegion(localRegion)
-				.build();
-		ddbMaster = ddbLocal;
-		
-		// Create table handles
-        localReplica = new Table(ddbLocal, table);
-        masterReplica = localReplica;
 	}
 	
 	
@@ -245,10 +226,10 @@ public class GlobalRequestRouter {
 	 */
 	
 	private void refreshMasterEndpoint() {
-		if (metadata == null) {
-			return;
-		} 
-		if (masterLease.maybeExpired()) {
+		if (masterLease == null) {
+			masterLease = metadata.getLease(tableName);
+		}
+		if (masterRegion == null || masterLease.maybeExpired()) {
 			Regions currentMaster = metadata.getMaster(tableName);
 			if (currentMaster != masterRegion) {
 				// master region has changed

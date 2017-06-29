@@ -35,7 +35,7 @@ import com.amazonaws.services.dynamodbv2.model.UpdateItemRequest;
 import com.amazonaws.services.dynamodbv2.model.UpdateItemResult;
 import com.amazonaws.services.dynamodbv2.util.TableUtils;
 
-public class GlobalTableTest {
+public class TestGlobalTable {
 
 	public final static String TABLE_NAME = "GlobalMovies";
 	
@@ -45,12 +45,12 @@ public class GlobalTableTest {
 	public static final Regions LOCAL_REGION = Regions.US_WEST_1;  // California
 	public static final Regions OTHER_REGION = Regions.AP_SOUTHEAST_2;  // Sydney
 	
-	public GlobalTableTest() {
+	public TestGlobalTable() {
 	}
 	
 	public void runTest() {
 		GlobalMetadata gmd = new GlobalMetadata();
-		Lease masterLease = new Lease();
+		Lease masterLease;
 		TestData data = new TestData();
 		GlobalRequestRouter grr;
 		long startTime, elapsedTime;
@@ -80,32 +80,27 @@ public class GlobalTableTest {
 		} else {
 			System.out.println("Global table named " + TABLE_NAME + " already exists");	
 		}
-		
+        
 		// Create actual table in region if necessary
-		CreateTableRequest createTableRequest = new CreateTableRequest()
-        		.withTableName(TABLE_NAME)
-        		.withKeySchema(new KeySchemaElement()
-            		.withAttributeName(TABLE_KEY)
-            		.withKeyType(KeyType.HASH))
-        		.withAttributeDefinitions(new AttributeDefinition()
-            		.withAttributeName(TABLE_KEY)
-            		.withAttributeType(ScalarAttributeType.S))
-				.withProvisionedThroughput(new ProvisionedThroughput()
-					.withReadCapacityUnits(1L)
-					.withWriteCapacityUnits(1L));
-        TableUtils.createTableIfNotExists(ddbMaster, createTableRequest);
+		ControlPlane cp = new ControlPlane();
+		cp.createRegionReplica(TABLE_NAME, TABLE_KEY, MASTER_REGION);
 		
 		// Get master
+		System.out.println();
 		System.out.println("Master region is " + gmd.getMaster(TABLE_NAME));			
 
+		// Obtain master lease on global table
+		masterLease = gmd.getLease(TABLE_NAME);
+        masterLease.acquire(MASTER_REGION);
+		
 		// Add a second region
 		gmd.addRegion(TABLE_NAME, LOCAL_REGION);
-        TableUtils.createTableIfNotExists(ddbLocal, createTableRequest);
+		cp.createRegionReplica(TABLE_NAME, TABLE_KEY, LOCAL_REGION);
 		System.out.println("Added region " + LOCAL_REGION);			
 				
 		// Add a third region
 		gmd.addRegion(TABLE_NAME, OTHER_REGION);
-        TableUtils.createTableIfNotExists(ddbOther, createTableRequest);
+		cp.createRegionReplica(TABLE_NAME, TABLE_KEY, OTHER_REGION);
 		System.out.println("Added region " + OTHER_REGION);			
 		
 		// Show all regions
@@ -147,17 +142,16 @@ public class GlobalTableTest {
         table.deleteItem(TABLE_KEY, itemName);
    
         // Create Global Request Router to use for all reads and writes
-		masterLease.acquire(MASTER_REGION);
-        grr = new GlobalRequestRouter(TABLE_NAME, LOCAL_REGION, masterLease);
+        grr = new GlobalRequestRouter(TABLE_NAME, LOCAL_REGION, gmd);
         System.out.println();
         System.out.println("Using Global Request Router in region " + LOCAL_REGION);
-        System.out.println();
 
         // Write 2 items with strong consistency
         item = data.getMovieItem(1);
         startTime = System.currentTimeMillis();
         grr.putItem(item);
         elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println();
         System.out.println("Strong consistency write of " + item.get(TABLE_KEY));
         System.out.println("     Latency = " + elapsedTime + " ms.");
         
@@ -168,6 +162,7 @@ public class GlobalTableTest {
         startTime = System.currentTimeMillis();
         grr.putItem(putItemSpec);
         elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println();
         System.out.println("Strong consistency write of " + item.get(TABLE_KEY));
         System.out.println("     Latency = " + elapsedTime + " ms.");
         
@@ -179,6 +174,7 @@ public class GlobalTableTest {
         startTime = System.currentTimeMillis();
         grr.putItem(putItemSpec);
         elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println();
         System.out.println("Eventual consistency write of " + item.get(TABLE_KEY));
         System.out.println("     Latency = " + elapsedTime + " ms.");
         
@@ -189,6 +185,7 @@ public class GlobalTableTest {
         startTime = System.currentTimeMillis();
         grr.putItem(putItemSpec);
         elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println();
         System.out.println("Eventual consistency write of " + item.get(TABLE_KEY));
         System.out.println("     Latency = " + elapsedTime + " ms.");
         
@@ -199,6 +196,7 @@ public class GlobalTableTest {
         startTime = System.currentTimeMillis();
         grr.putItem(putItemSpec);
         elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println();
         System.out.println("Eventual consistency write of " + item.get(TABLE_KEY));
         System.out.println("     Latency = " + elapsedTime + " ms.");
         
@@ -252,6 +250,7 @@ public class GlobalTableTest {
         startTime = System.currentTimeMillis();
         itemRead = grr.getItem(getItemSpec);
         elapsedTime = System.currentTimeMillis() - startTime;
+        System.out.println();
         if (itemRead == null) {
         	System.out.println("Unable to read " + item.get(TABLE_KEY) + " with strong consistency");
         } else {
